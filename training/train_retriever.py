@@ -98,10 +98,9 @@ tantivy_index = tantivy.Index.open(TANTIVY_INDEX_PATH)
 
 def bm25_search(query: str, top_k: int = 50) -> List[int]:
     searcher = tantivy_index.searcher()
-    parser = tantivy.QueryParser.for_index(tantivy_index, ["text"])
-    q = parser.parse_query(query)
+    q, _ = tantivy_index.parse_query_lenient(query, ["text"])
     hits = searcher.search(q, top_k).hits
-    return [int(searcher.doc(doc_id)["id"][0]) for doc_id, _ in hits]
+    return [int(searcher.doc(doc_address)["id"][0]) for _, doc_address in hits]
 
 def dense_search(query: str, top_k: int = 50) -> List[int]:
     emb = model.encode([query], normalize_embeddings=True).astype(np.float32)

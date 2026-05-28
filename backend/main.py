@@ -163,11 +163,31 @@ def build_indices():
     profiles = load_profiles_from_csv(DATA_PATH)
     print(f"Loaded {len(profiles)} profiles.")
     docs = [p["text"] for p in profiles]
-    print("Generating embeddings...")
-    embeddings = model.encode(docs, normalize_embeddings=True, show_progress_bar=True)
-    dim = embeddings.shape[1]
-    faiss_index = faiss.IndexFlatIP(dim)
-    faiss_index.add(embeddings.astype(np.float32))
+    emb_path = "profiles.npy"
+    faiss_path = "faiss_index.bin"
+    embeddings = None
+    if os.path.exists(emb_path) and os.path.exists(faiss_path):
+        try:
+            temp_embeddings = np.load(emb_path)
+            if temp_embeddings.shape[0] == len(profiles):
+                print("✅ Loading existing pre-computed embeddings and FAISS index...")
+                embeddings = temp_embeddings
+                faiss_index = faiss.read_index(faiss_path)
+            else:
+                raise ValueError(f"Cache count ({temp_embeddings.shape[0]}) mismatch with loaded profiles ({len(profiles)})")
+        except Exception as e:
+            print(f"ℹ️ Re-generating embeddings due to cache mismatch or load error: {e}")
+            embeddings = None
+
+    if embeddings is None:
+        print("Generating embeddings from scratch...")
+        embeddings = model.encode(docs, normalize_embeddings=True, show_progress_bar=True)
+        np.save(emb_path, embeddings)
+        dim = embeddings.shape[1]
+        faiss_index = faiss.IndexFlatIP(dim)
+        faiss_index.add(embeddings.astype(np.float32))
+        faiss.write_index(faiss_index, faiss_path)
+        print("💾 Saved embeddings and FAISS index cache.")
     print("Building Tantivy BM25 index...")
     tantivy_index = build_tantivy_index(profiles)
     if os.path.exists(LTR_MODEL_PATH):
@@ -192,11 +212,9 @@ build_indices()
 # ---------- Retrieval Helpers ----------
 def bm25_search(query: str, top_k: int = 100) -> List[tuple]:
     searcher = tantivy_index.searcher()
-    parser = tantivy_index.query_parser()
-    parser.set_default_fields(["text"])
-    q = parser.parse_query(query)
+    q, _ = tantivy_index.parse_query_lenient(query, ["text"])
     hits = searcher.search(q, top_k).hits
-    return [(int(searcher.doc(doc_id)["id"][0]), score) for doc_id, score in hits]
+    return [(int(searcher.doc(doc_address)["id"][0]), score) for score, doc_address in hits]
 
 def dense_search(query: str, top_k: int = 100) -> List[tuple]:
     emb = model.encode([query], normalize_embeddings=True).astype(np.float32)
@@ -349,7 +367,6 @@ async def search(request: SearchRequest):
                 features_list.append([
                     bm25_dict.get(idx, 0.0),
                     dense_dict.get(idx, 0.0),
-                    graph_dict.get(idx, 0.0),
                     p.get("years", 0),
                     len(set(p.get("entities", [])).intersection(query_skills)),
                     quality_score(p["text"]),
